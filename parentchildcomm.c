@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <strings.h>
 #include <stdarg.h>
 
 const char * const * sys_errlist;
@@ -35,48 +36,48 @@ popen_dup(int* fdout_ptr, char** envp, int nargs, ...)
     args[nargs -n] = va_arg(ap, char *);
   while (--n);
 
-  if ((childpid = fork()) == -1)
-    {
-      perror("fork");
-      exit(1);
-    }
-
-  if (pipe2(fdout, 0) == -1)
+  if (pipe2(fdout, O_NONBLOCK) == -1)
     {
       perror("pipe2");
       return -1;     
     }
 
-  switch(childpid)
+  if ((childpid = fork()) == -1)
     {
-    case 0:
-      fprintf(stdout, "In child process (pid = %d)\n", getpid());
-
-      close(fdout[PIPE_READ_END]);
-      close(STDOUT_FILENO);
-      if (dup(fdout[PIPE_WRITE_END]) == -1)
-        {
-          perror("dup write end fd of output pipe");
-          return -1;
-        }
-
-      if (execve(args[0], args, envp) == -1)
-        {
-          perror("execv child command");
-          return -1;
-        }
-
-      /* Never reached ... */
-      while (1);
-      break;
-
-    default:
-      fprintf(stdout, "In parent process (pid = %d): PID of child process = %d\n", getpid(), childpid);
-      close(fdout[PIPE_WRITE_END]);
-      if (fdout_ptr)
-        *fdout_ptr = fdout[PIPE_READ_END];
-      break;
+      perror("fork");
+      exit(1);
     }
+  else
+    switch(childpid)
+      {
+      case 0:
+        close(fdout[PIPE_READ_END]);
+        close(STDOUT_FILENO);
+        if (dup(fdout[PIPE_WRITE_END]) == -1)
+          {
+            perror("dup write end fd of output pipe");
+            return -1;
+          }
+        
+        fprintf(stdout, "In child process (pid = %d)\n\n", getpid());
+        fprintf(stdout, "===========Command launched=========== \n");
+        
+        if (execve(args[0], args, envp) == -1)
+          {
+            perror("execve child command");
+            return -1;
+          }
+        
+        /* Never reached ... */
+        while (1);
+        break;
+        
+      default:
+        fprintf(stdout, "In parent process (pid = %d): PID of child process = %d\n", getpid(), childpid);
+        close(fdout[PIPE_WRITE_END]);
+        if (fdout_ptr)
+          *fdout_ptr = fdout[PIPE_READ_END];
+      }
 
   return (childpid);
 }
@@ -91,15 +92,28 @@ main(int argc, char** argv, char** envp)
   
   pid_t childpid = popen_dup(&fdout, envp, 2, "/bin/ls", "-l");
 
-  FILE* fpout = (FILE*)(fdout == -1 ? NULL : fdopen(fdout, "r")); \
-
-  if ((outsz = read(fileno(fpout), outbuf, PIPE_BUF-1)) == -1)
+  bzero(outbuf, PIPE_BUF);
+  outsz = read(fdout, outbuf, PIPE_BUF-1);
+  do
     {
-      perror("read stdout fils");
-      exit(1);
+      if (outsz == -1)
+        {
+          perror("read stdout fils in loop");
+          exit(1);          
+        }
+      else if (outsz > 0)
+        {
+          fprintf(stdout, "read %ld bytes: '%s'\n", outsz, outbuf);      
+        }
+      else if (outsz == 0)
+        break;
     }
-  else
-    fprintf(stdout, "read %ld bytes: '%s'\n", outsz, outbuf);
+  while((outsz = read(fdout, outbuf, PIPE_BUF-1)) > 0);
+  if (outsz == -1)
+    {
+      perror("read stdout fils after loop");
+      exit(1);          
+    }
   
   waitpid(childpid, &wstatus, 0);
 }
